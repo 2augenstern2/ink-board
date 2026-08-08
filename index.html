@@ -682,11 +682,28 @@
         </div>
         <div class="control-group">
           <label>MQTT Sub Topic (订阅地址)</label>
-          <input type="text" id="mDeviceTopic" class="form-input" placeholder="例如: inkboard/device_152">
+          <input type="text" id="mDeviceTopic" class="form-input" placeholder="例如: inkboard/device_152" oninput="syncPairingCodeFromForm()">
         </div>
         <div class="control-group">
           <label>设备接收密钥（32 位 Hex）</label>
-          <input type="text" id="mDevicePsk" class="form-input" placeholder="从设备配网页复制 my_key，例如 001122...">
+          <input type="text" id="mDevicePsk" class="form-input" placeholder="从设备配网页复制 my_key，例如 001122..." oninput="syncPairingCodeFromForm()">
+        </div>
+        <div class="control-group">
+          <label>粘贴设备配对码</label>
+          <textarea id="mPairCode" class="form-input" rows="3"
+            placeholder="inkboard://v1?t=...&amp;k=..."></textarea>
+          <button class="btn btn-secondary" type="button" onclick="importPairingCode()">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> 自动填入频道和密钥
+          </button>
+          <p class="hint">从对方设备配网页复制整条链接并粘贴即可。</p>
+        </div>
+        <div class="control-group">
+          <label>当前设备配对码（可发给对方）</label>
+          <textarea id="mPairingCode" class="form-input" rows="3" readonly
+            placeholder="填写频道和密钥后可复制"></textarea>
+          <button class="btn btn-secondary" type="button" onclick="copyCurrentPairingCode()">
+            <i class="fa-regular fa-copy"></i> 一键复制对方链接
+          </button>
         </div>
         <div class="control-group">
           <label>屏幕分辨率</label>
@@ -1427,12 +1444,77 @@
       document.getElementById('mDeviceName').value = sanitizeDeviceName(dev.name);
       document.getElementById('mDeviceTopic').value = dev.topic;
       document.getElementById('mDevicePsk').value = dev.psk;
+      document.getElementById('mPairCode').value = '';
+      syncPairingCodeFromForm();
       document.getElementById('mDeviceRes').value = dev.res;
       document.getElementById('deviceModal').classList.add('open');
     }
 
     function closeDeviceModal() {
       document.getElementById('deviceModal').classList.remove('open');
+    }
+
+    function buildPairingCode(topic, key) {
+      const normalizedTopic = (topic || '').trim();
+      const normalizedKey = (key || '').trim().toLowerCase();
+      if (!normalizedTopic || !/^[0-9a-f]{32}$/.test(normalizedKey)) return '';
+      return `inkboard://v1?t=${encodeURIComponent(normalizedTopic)}&k=${normalizedKey}`;
+    }
+
+    function syncPairingCodeFromForm() {
+      const topic = document.getElementById('mDeviceTopic').value;
+      const key = document.getElementById('mDevicePsk').value;
+      document.getElementById('mPairingCode').value = buildPairingCode(topic, key);
+    }
+
+    function importPairingCode() {
+      const raw = document.getElementById('mPairCode').value.trim();
+      try {
+        const uri = new URL(raw);
+        const topic = uri.searchParams.get('t') || '';
+        const key = (uri.searchParams.get('k') || '').toLowerCase();
+        if (uri.protocol !== 'inkboard:' || uri.hostname !== 'v1' ||
+            !topic || !/^[0-9a-f]{32}$/.test(key)) {
+          throw new Error('格式或密钥无效');
+        }
+        document.getElementById('mDeviceTopic').value = topic;
+        document.getElementById('mDevicePsk').value = key;
+        syncPairingCodeFromForm();
+        showToast('已自动填入设备频道和密钥', 'success');
+      } catch (err) {
+        showToast('配对码无效，请粘贴完整的 inkboard://v1?... 链接', 'error');
+      }
+    }
+
+    async function copyText(text) {
+      if (!text) throw new Error('请先填写有效的频道和 32 位 Hex 密钥');
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const temporary = document.createElement('textarea');
+      temporary.value = text;
+      temporary.style.position = 'fixed';
+      temporary.style.opacity = '0';
+      document.body.appendChild(temporary);
+      temporary.select();
+      const copied = document.execCommand('copy');
+      temporary.remove();
+      if (!copied) throw new Error('浏览器未授权剪贴板');
+    }
+
+    async function copyCurrentPairingCode() {
+      try {
+        const code = buildPairingCode(
+          document.getElementById('mDeviceTopic').value,
+          document.getElementById('mDevicePsk').value
+        );
+        await copyText(code);
+        document.getElementById('mPairingCode').value = code;
+        showToast('设备配对码已复制，可直接发给对方', 'success');
+      } catch (err) {
+        showToast(`复制失败：${err.message}`, 'error');
+      }
     }
 
     function saveCurrentDeviceForm() {
@@ -1443,8 +1525,8 @@
 
       const name = sanitizeDeviceName(rawName);
 
-      if (!name || !topic || !psk) {
-        showToast('请完整填写设备配置项！', 'error');
+      if (!name || !topic || !/^[0-9a-fA-F]{32}$/.test(psk)) {
+        showToast('请填写名称、频道和 32 位 Hex 设备密钥！', 'error');
         return;
       }
 
