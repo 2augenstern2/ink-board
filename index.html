@@ -648,9 +648,11 @@
         <div class="control-group">
           <label>黑白转换模式</label>
           <div class="segmented-control">
-            <button class="segmented-btn active" id="btnDitherFloyd" onclick="setImageAlgo('floyd')">Floyd-Steinberg 误差扩散抖动</button>
+            <button class="segmented-btn" id="btnDitherDirect" onclick="setImageAlgo('direct')">原图直传（已适配黑白图）</button>
+            <button class="segmented-btn active" id="btnDitherFloyd" onclick="setImageAlgo('floyd')">Floyd-Steinberg 抖动（照片推荐）</button>
             <button class="segmented-btn" id="btnDitherThreshold" onclick="setImageAlgo('threshold')">二值化 (Threshold)</button>
           </div>
+          <p class="hint">原图直传不会进行锐化、对比度增强或抖动；推荐使用与设备分辨率完全一致的黑白 PNG。</p>
         </div>
 
         <div class="control-group">
@@ -707,9 +709,10 @@
         </div>
         <div class="control-group">
           <label>屏幕分辨率</label>
-          <select id="mDeviceRes">
+          <select id="mDeviceRes" onchange="syncPairingCodeFromForm()">
             <option value="152x152">152 x 152 (1.54寸)</option>
-            <option value="400x300">400 x 300 (4.2寸)</option>
+            <option value="240x416">240 x 416 (3.7寸)</option>
+            <option value="400x300">400 x 300 (4.0寸)</option>
           </select>
         </div>
         <div style="display:flex; gap:10px; margin-top:10px;">
@@ -777,7 +780,14 @@
       },
       {
         id: 'dev_default_2',
-        name: '4.2 寸屏 (400x300)',
+        name: '3.7 寸屏 (240x416)',
+        topic: 'inkboard/device_240x416',
+        psk: '',
+        res: '240x416'
+      },
+      {
+        id: 'dev_default_3',
+        name: '4.0 寸屏 (400x300)',
         topic: 'inkboard/device_400',
         psk: '',
         res: '400x300'
@@ -810,7 +820,7 @@
 
     // Image Mode State
     let uploadedImage = null;
-    let imageAlgo = 'floyd'; // 'floyd' or 'threshold'
+    let imageAlgo = 'floyd'; // 'direct', 'floyd' or 'threshold'
 
     // Temporary payload for debug modal sending
     let pendingPublishPayload = null;
@@ -1152,8 +1162,10 @@
 
     function setImageAlgo(algo) {
       imageAlgo = algo;
+      document.getElementById('btnDitherDirect').classList.toggle('active', algo === 'direct');
       document.getElementById('btnDitherFloyd').classList.toggle('active', algo === 'floyd');
       document.getElementById('btnDitherThreshold').classList.toggle('active', algo === 'threshold');
+      document.getElementById('thresholdInput').disabled = algo === 'direct';
       renderImageMode();
     }
 
@@ -1173,20 +1185,28 @@
       const threshold = parseInt(document.getElementById('thresholdInput').value);
       document.getElementById('thresholdVal').textContent = threshold;
 
-      // Draw resized image preserving aspect ratio / scale to fill
+      // Scale the whole image into the screen. Exact-size direct images are
+      // copied pixel-for-pixel; mismatched direct images use nearest-neighbor
+      // scaling so hard black/white edges are not blurred.
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+      const directMode = imageAlgo === 'direct';
+      const exactSize = uploadedImage.width === canvas.width && uploadedImage.height === canvas.height;
       const hRatio = canvas.width / uploadedImage.width;
       const vRatio = canvas.height / uploadedImage.height;
-      const ratio = Math.max(hRatio, vRatio);
-      const centerShift_x = (canvas.width - uploadedImage.width * ratio) / 2;
-      const centerShift_y = (canvas.height - uploadedImage.height * ratio) / 2;
+      const ratio = exactSize ? 1 : Math.min(hRatio, vRatio);
+      const drawWidth = exactSize ? canvas.width : Math.round(uploadedImage.width * ratio);
+      const drawHeight = exactSize ? canvas.height : Math.round(uploadedImage.height * ratio);
+      const centerShift_x = exactSize ? 0 : Math.floor((canvas.width - drawWidth) / 2);
+      const centerShift_y = exactSize ? 0 : Math.floor((canvas.height - drawHeight) / 2);
 
+      ctx.imageSmoothingEnabled = !directMode;
+      if (!directMode && 'imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(
         uploadedImage,
         0, 0, uploadedImage.width, uploadedImage.height,
-        centerShift_x, centerShift_y, uploadedImage.width * ratio, uploadedImage.height * ratio
+        centerShift_x, centerShift_y, drawWidth, drawHeight
       );
 
       // Apply Dithering / Threshold algorithm directly on Pixel Buffer
@@ -1195,7 +1215,23 @@
       const w = canvas.width;
       const h = canvas.height;
 
-      // Grayscale conversion
+      if (directMode) {
+        // The display is physically 1-bit, so only a hard black/white decision
+        // remains. No sharpening, contrast stretch, or error diffusion is used.
+        for (let i = 0; i < w * h; i++) {
+          const r = data[i * 4];
+          const g = data[i * 4 + 1];
+          const b = data[i * 4 + 2];
+          const val = (0.299 * r + 0.587 * g + 0.114 * b) < 128 ? 0 : 255;
+          data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = val;
+          data[i * 4 + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        return;
+      }
+
+      // Grayscale conversion. A small unsharp mask after high-quality browser
+      // scaling keeps fine outlines from turning into a grey blur.
       const gray = new Float32Array(w * h);
       for (let i = 0; i < w * h; i++) {
         const r = data[i * 4];
@@ -1204,25 +1240,61 @@
         gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
       }
 
+      if (w > 2 && h > 2) {
+        const original = gray.slice();
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const i = y * w + x;
+            const blur = (original[i - w] + original[i - 1] + 4 * original[i]
+                        + original[i + 1] + original[i + w]) / 8;
+            gray[i] = Math.max(0, Math.min(255, original[i] + 0.55 * (original[i] - blur)));
+          }
+        }
+      }
+
+      // Stretch the useful tonal range while ignoring tiny extreme highlights
+      // and shadows. This gives photographs more separation before 1-bit
+      // conversion, without changing pure white margins.
+      const histogram = new Uint32Array(256);
+      for (let i = 0; i < gray.length; i++) histogram[Math.round(gray[i])]++;
+      const cutoff = Math.max(1, Math.floor(gray.length * 0.01));
+      let low = 0, high = 255, seen = 0;
+      for (; low < 256; low++) { seen += histogram[low]; if (seen >= cutoff) break; }
+      seen = 0;
+      for (; high >= 0; high--) { seen += histogram[high]; if (seen >= cutoff) break; }
+      if (high - low >= 24) {
+        const scale = 255 / (high - low);
+        for (let i = 0; i < gray.length; i++) {
+          gray[i] = Math.max(0, Math.min(255, (gray[i] - low) * scale));
+        }
+      }
+
       if (imageAlgo === 'threshold') {
         for (let i = 0; i < w * h; i++) {
           const val = gray[i] < threshold ? 0 : 255;
           data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = val;
         }
       } else {
-        // Floyd-Steinberg Error Diffusion Algorithm
+        // Serpentine Floyd-Steinberg error diffusion. Alternating each row
+        // removes the one-direction streaking visible in ordinary photos.
         for (let y = 0; y < h; y++) {
-          for (let x = 0; x < w; x++) {
+          const leftToRight = (y & 1) === 0;
+          const start = leftToRight ? 0 : w - 1;
+          const end = leftToRight ? w : -1;
+          const step = leftToRight ? 1 : -1;
+          for (let x = start; x !== end; x += step) {
             const idx = y * w + x;
             const oldPixel = gray[idx];
             const newPixel = oldPixel < threshold ? 0 : 255;
             gray[idx] = newPixel;
             const err = oldPixel - newPixel;
 
-            if (x + 1 < w) gray[idx + 1] += err * (7 / 16);
-            if (x - 1 >= 0 && y + 1 < h) gray[idx + w - 1] += err * (3 / 16);
+            const nextX = x + step;
+            const farX = x - step;
+            if (nextX >= 0 && nextX < w) gray[idx + step] += err * (7 / 16);
+            if (y + 1 < h && farX >= 0 && farX < w) gray[idx + w - step] += err * (3 / 16);
             if (y + 1 < h) gray[idx + w] += err * (5 / 16);
-            if (x + 1 < w && y + 1 < h) gray[idx + w + 1] += err * (1 / 16);
+            if (y + 1 < h && nextX >= 0 && nextX < w) gray[idx + w + step] += err * (1 / 16);
           }
         }
 
@@ -1262,13 +1334,10 @@
     // 1-Bit Bitmap Packing Helper
     // ==========================================
     function getCanvas1BitBytes() {
-      if (canvas.width !== 152 || canvas.height !== 152) {
-        throw new Error('当前 ESP32 固件只接受 152 x 152 位图');
-      }
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imgData.data;
       const totalPixels = canvas.width * canvas.height;
-      const numBytes = totalPixels / 8;
+      const numBytes = Math.ceil(totalPixels / 8);
       const byteArray = new Uint8Array(numBytes);
 
       for (let i = 0; i < totalPixels; i++) {
@@ -1345,8 +1414,9 @@
       }
 
       let encrypted;
+      let bitmap;
       try {
-        const bitmap = getCanvas1BitBytes();
+        bitmap = getCanvas1BitBytes();
         encrypted = await encryptDraw(bitmap, dev.psk);
       } catch (err) {
         showToast(`无法加密发送：${err.message}`, 'error');
@@ -1360,7 +1430,7 @@
 
       // Open debug preview modal
       document.getElementById('debugRawJson').textContent =
-        `{"cmd":"DRAW","ts":当前时间}\n + 2888 bytes raw 1-bit bitmap`;
+        `{"cmd":"DRAW","ts":当前时间}\n + ${bitmap.length} bytes raw 1-bit bitmap (${canvas.width} x ${canvas.height})`;
       document.getElementById('debugEncryptedPayload').textContent = encrypted.base64;
       document.getElementById('debugModal').classList.add('open');
     }
@@ -1444,9 +1514,9 @@
       document.getElementById('mDeviceName').value = sanitizeDeviceName(dev.name);
       document.getElementById('mDeviceTopic').value = dev.topic;
       document.getElementById('mDevicePsk').value = dev.psk;
+      document.getElementById('mDeviceRes').value = dev.res;
       document.getElementById('mPairCode').value = '';
       syncPairingCodeFromForm();
-      document.getElementById('mDeviceRes').value = dev.res;
       document.getElementById('deviceModal').classList.add('open');
     }
 
@@ -1454,17 +1524,20 @@
       document.getElementById('deviceModal').classList.remove('open');
     }
 
-    function buildPairingCode(topic, key) {
+    function buildPairingCode(topic, key, resolution) {
       const normalizedTopic = (topic || '').trim();
       const normalizedKey = (key || '').trim().toLowerCase();
       if (!normalizedTopic || !/^[0-9a-f]{32}$/.test(normalizedKey)) return '';
-      return `inkboard://v1?t=${encodeURIComponent(normalizedTopic)}&k=${normalizedKey}`;
+      const normalizedResolution = /^[0-9]+x[0-9]+$/.test(resolution || '') ? resolution : '';
+      return `inkboard://v1?t=${encodeURIComponent(normalizedTopic)}&k=${normalizedKey}` +
+        (normalizedResolution ? `&r=${normalizedResolution}` : '');
     }
 
     function syncPairingCodeFromForm() {
       const topic = document.getElementById('mDeviceTopic').value;
       const key = document.getElementById('mDevicePsk').value;
-      document.getElementById('mPairingCode').value = buildPairingCode(topic, key);
+      const resolution = document.getElementById('mDeviceRes').value;
+      document.getElementById('mPairingCode').value = buildPairingCode(topic, key, resolution);
     }
 
     function importPairingCode() {
@@ -1473,14 +1546,19 @@
         const uri = new URL(raw);
         const topic = uri.searchParams.get('t') || '';
         const key = (uri.searchParams.get('k') || '').toLowerCase();
+        const resolution = uri.searchParams.get('r') || '';
         if (uri.protocol !== 'inkboard:' || uri.hostname !== 'v1' ||
             !topic || !/^[0-9a-f]{32}$/.test(key)) {
           throw new Error('格式或密钥无效');
         }
         document.getElementById('mDeviceTopic').value = topic;
         document.getElementById('mDevicePsk').value = key;
+        if (resolution && [...document.getElementById('mDeviceRes').options]
+            .some(option => option.value === resolution)) {
+          document.getElementById('mDeviceRes').value = resolution;
+        }
         syncPairingCodeFromForm();
-        showToast('已自动填入设备频道和密钥', 'success');
+        showToast('已自动填入设备频道、密钥和屏幕分辨率', 'success');
       } catch (err) {
         showToast('配对码无效，请粘贴完整的 inkboard://v1?... 链接', 'error');
       }
@@ -1507,7 +1585,8 @@
       try {
         const code = buildPairingCode(
           document.getElementById('mDeviceTopic').value,
-          document.getElementById('mDevicePsk').value
+          document.getElementById('mDevicePsk').value,
+          document.getElementById('mDeviceRes').value
         );
         await copyText(code);
         document.getElementById('mPairingCode').value = code;
