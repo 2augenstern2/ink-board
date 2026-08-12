@@ -713,6 +713,7 @@
             <option value="152x152">152 x 152 (1.54寸)</option>
             <option value="240x416">240 x 416 (3.7寸)</option>
             <option value="400x300">400 x 300 (4.0寸)</option>
+            <option value="300x400">300 x 400 (Waveshare RLCD 4.2寸)</option>
           </select>
         </div>
         <div style="display:flex; gap:10px; margin-top:10px;">
@@ -791,6 +792,13 @@
         topic: 'inkboard/device_400',
         psk: '',
         res: '400x300'
+      },
+      {
+        id: 'dev_default_4',
+        name: 'Waveshare RLCD 4.2寸 (300x400)',
+        topic: 'inkboard/device_rlcd_42',
+        psk: '',
+        res: '300x400'
       }
     ];
 
@@ -852,6 +860,11 @@
           // Sanitize any previously saved device names
           devices.forEach(d => {
             d.name = sanitizeDeviceName(d.name);
+          });
+          // Add newly supported built-in profiles without overwriting users'
+          // saved topics, keys or custom devices.
+          DEFAULT_DEVICES.forEach(profile => {
+            if (!devices.some(d => d.res === profile.res)) devices.push({...profile});
           });
           saveDevicesToStorage();
         } catch (e) {
